@@ -800,7 +800,11 @@ export class ScriptedProcessRunner implements ProcessRunner {
    * released, and a spawned child that stays referenced keeps the daemon alive after
    * `daemon stop`.
    */
-  readonly handles: (ProcessHandle & { readonly unreffed: boolean })[] = [];
+  readonly handles: (ProcessHandle & {
+    readonly unreffed: boolean;
+    /** why: ends a `hangs` child with an answer, as a slow command that finishes after its caller stopped waiting does. */
+    answer(result: ProcessResult): void;
+  })[] = [];
   #nextPid = 1;
   readonly #expectations: ScriptedProcessExpectation[];
 
@@ -1003,6 +1007,10 @@ class ScriptedProcessHandle implements ProcessHandle {
 
   unref(): void {
     this.unreffed = true;
+  }
+
+  answer(result: ProcessResult): void {
+    this.#finish(result);
   }
 
   wait(): Promise<ProcessResult> {
