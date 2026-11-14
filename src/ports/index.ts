@@ -4,7 +4,7 @@ export {
   MemoryFilesystem,
   NodeFilesystem,
 } from "./filesystem.js";
-export type { PathDetails } from "./filesystem.js";
+export type { PathDetails, TreeRewrite } from "./filesystem.js";
 export { readPackageVersion } from "./package-version.js";
 export {
   DATA_DIRECTORY_MODE,

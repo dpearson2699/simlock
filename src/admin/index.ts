@@ -15,6 +15,8 @@ export type {
   AlertsTestInput,
   AlertsTestOutput,
   AnySimlockError,
+  BaselineImportInput,
+  BaselineImportOutput,
   BaselineListOutput,
   BaselineRemoveInput,
   BaselineRemoveOutput,

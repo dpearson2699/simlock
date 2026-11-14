@@ -34,7 +34,7 @@ This page lists what each command accepts. For when and why to use a command, fo
 | [`simlock nuke`](#simlock-nuke) | End every lease and stop every device at once | [Troubleshooting](/simlock/docs/worker/troubleshooting) |
 | [`simlock warm`](#simlock-warm) | Forget a kind the warm pool learned from a lease | [Capacity and the warm pool](/simlock/docs/worker/capacity#forget-a-learned-kind) |
 | [`simlock component`](#simlock-component) | Install, list and remove runtimes and system images | [Runtimes and images](/simlock/docs/worker/runtimes-and-images) |
-| [`simlock baseline`](#simlock-baseline) | Save a held device as a named baseline, list baselines, remove one | [Baselines](/simlock/docs/worker/baselines) |
+| [`simlock baseline`](#simlock-baseline) | Save a held device or import a shut-down simulator as a named baseline, list baselines, remove one | [Baselines](/simlock/docs/worker/baselines) |
 | [`simlock device`](#simlock-device) | Enrol or forget a physical device | [Enrolling physical devices](/simlock/docs/worker/enrolling-physical-devices) |
 | [`simlock token`](#simlock-token) | Create, list and revoke access tokens | [Access control](/simlock/docs/gateway/access-control) |
 | [`simlock worker`](#simlock-worker) | List and manage a gateway's workers | [Managing workers](/simlock/docs/gateway/managing-workers) |
@@ -596,10 +596,11 @@ Simlock refuses to remove a component it did not install (`COMPONENT_NOT_OWNED`)
 
 ## simlock baseline
 
-Save a prepared simulator or emulator as a named baseline, list the baselines on this worker, and remove one. See [Baselines](/simlock/docs/worker/baselines).
+Save a prepared simulator or emulator as a named baseline, import a shut-down simulator as one, list the baselines on this worker, and remove one. See [Baselines](/simlock/docs/worker/baselines).
 
 ```text
 simlock baseline save <name> --lease <id> [--note <text>]
+simlock baseline import <name> --device <udid> [--mode slim|full] [--note <text>]
 simlock baseline list [--json]
 simlock baseline remove <name> [--yes] [--worker <id>]
 ```
@@ -620,6 +621,24 @@ Saved baseline checkout v1: android Pixel 9, Android 36 (google_apis), full, 4.8
 ```
 
 The size is the copy's bytes on disk, in GB (10^9 bytes) with one decimal, or MB below 1 GB; it is left out when it could not be counted. A lease on a physical device is refused with `BAD_REQUEST`, an unknown lease with `UNKNOWN_LEASE`. When the copy cannot be made the lease has still ended and the answer is `BASELINE_SAVE_FAILED`. On a gateway the lease's worker saves it.
+
+### simlock baseline import
+
+Keep a copy of a shut-down iOS simulator that Simlock did not make, in Xcode's device set, under the name. The simulator is only read: it is never booted, shut down, erased, renamed or marked, and stays as it was. Importing under a name that exists makes the next version and drops the older one, as a save does. Needs the admin role and `drivers.ios.deviceSet: "default"`.
+
+| Argument or flag | Meaning | Default |
+| --- | --- | --- |
+| `<name>` | The baseline's name, as for `save`. Required. | — |
+| `--device <udid>` | The simulator to copy. Required. | — |
+| `--mode <slim\|full>` | The mode a lease of the baseline gets. | `full` |
+| `--note <text>` | A note of up to 200 characters, on one line. | — |
+
+```text
+$ simlock baseline import signed-in --device 3C1E2A4B-5D6F-4708-9A1B-2C3D4E5F6071 --note "test user"
+Imported baseline signed-in v1: ios iPhone 17, iOS 27.0, full, 6.4 GB. Simulator 3C1E2A4B-5D6F-4708-9A1B-2C3D4E5F6071 was left as it was.
+```
+
+A lease of the baseline gets the simulator's model and OS version. Before its first boot each lease's copy has the simulator's UDID in its stored paths replaced with its own, so it never writes into the simulator it came from. A simulator that is not in Xcode's device set, is not `Shutdown`, was made by Simlock, or has a runtime or device type that is not installed is refused with `BAD_REQUEST`, and nothing is copied. A simulator that leaves `Shutdown` while it is copied, and a copy that cannot be made, end with `BASELINE_SAVE_FAILED` and keep nothing. A gateway refuses it with `UNSUPPORTED_IN_GATEWAY_MODE`; run it on the worker.
 
 ### simlock baseline list
 

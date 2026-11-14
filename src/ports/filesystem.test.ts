@@ -1,4 +1,4 @@
-import { lstat, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, stat, symlink, utimes, writeFile } from "node:fs/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -23,12 +23,16 @@ const implementations: Array<{
   name: string;
   create(): Filesystem;
   link(filesystem: Filesystem, path: string, target: string): Promise<void>;
+  deny(filesystem: Filesystem, path: string): Promise<void>;
 }> = [
   {
     name: "memory filesystem",
     create: () => new MemoryFilesystem(),
     link: async (filesystem, path, target) => {
       (filesystem as MemoryFilesystem).defineSymlink(path, target);
+    },
+    deny: async (filesystem, path) => {
+      (filesystem as MemoryFilesystem).defineFailure(path, "EACCES");
     },
   },
   {
@@ -37,6 +41,9 @@ const implementations: Array<{
     link: async (_filesystem, path, target) => {
       await symlink(target, path);
     },
+    deny: async (_filesystem, path) => {
+      await chmod(path, 0);
+    },
   },
 ];
 
@@ -44,7 +51,52 @@ afterEach(async () => {
   await new NodeFilesystem().rm(temporaryDirectory);
 });
 
-describe.each(implementations)("Filesystem contract: $name", ({ create, link }) => {
+describe.each(implementations)("Filesystem contract: $name", ({ create, link, deny }) => {
+  it("rewriteTree changes a file in place and retargets a link, removes an unreadable file only where the caller allows, and leaves the rest", async () => {
+    const filesystem = create();
+    const root = `${temporaryDirectory}/tree`;
+    await filesystem.mkdirp(`${root}/a/Caches`);
+    await filesystem.writeFileAtomic(`${root}/a/named`, "path /D/OLD/x");
+    await filesystem.writeFileAtomic(`${root}/a/other`, "nothing to change");
+    await filesystem.writeFileAtomic(`${root}/OLD-target`, "old target");
+    await filesystem.writeFileAtomic(`${root}/NEW-target`, "new target");
+    await link(filesystem, `${root}/a/link`, `${root}/OLD-target`);
+    const before = await filesystem.stat(`${root}/a/named`);
+    const rewrite = {
+      file: (bytes: Buffer) => {
+        const at = bytes.indexOf("OLD");
+        if (at < 0) return undefined;
+        bytes.write("NEW", at);
+        return bytes;
+      },
+      link: (target: string) => (target.includes("OLD") ? target.replace("OLD", "NEW") : undefined),
+      unreadable: (path: string) => path.split("/").includes("Caches"),
+    };
+
+    await expect(filesystem.rewriteTree(root, rewrite)).resolves.toEqual({ removed: [] });
+    await expect(filesystem.readFile(`${root}/a/named`)).resolves.toBe("path /D/NEW/x");
+    expect((await filesystem.stat(`${root}/a/named`)).identity).toBe(before.identity);
+    await expect(filesystem.readFile(`${root}/a/other`)).resolves.toBe("nothing to change");
+    await expect(filesystem.readFile(`${root}/a/link`)).resolves.toBe("new target");
+    expect((await filesystem.lstat(`${root}/a/link`)).kind).toBe("symlink");
+
+    await filesystem.writeFileAtomic(`${root}/a/Caches/locked`, "OLD");
+    await deny(filesystem, `${root}/a/Caches/locked`);
+    await expect(filesystem.rewriteTree(root, rewrite)).resolves.toEqual({
+      removed: ["a/Caches/locked"],
+    });
+    await expect(filesystem.exists(`${root}/a/Caches/locked`)).resolves.toBe(false);
+
+    await filesystem.writeFileAtomic(`${root}/a/locked`, "OLD");
+    await deny(filesystem, `${root}/a/locked`);
+    await expect(filesystem.rewriteTree(root, rewrite)).rejects.toMatchObject({ code: "EACCES" });
+
+    const longer = { ...rewrite, file: (bytes: Buffer) => Buffer.concat([bytes, bytes]) };
+    await filesystem.mkdirp(`${root}/b`);
+    await filesystem.writeFileAtomic(`${root}/b/named`, "OLD");
+    await expect(filesystem.rewriteTree(`${root}/b`, longer)).rejects.toThrow(/must keep its/);
+  });
+
   it("atomically writes and overwrites a complete file", async () => {
     const filesystem = create();
     const file = `${temporaryDirectory}/devices/registry.json`;

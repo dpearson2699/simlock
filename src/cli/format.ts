@@ -2,6 +2,7 @@
 // error never load the human renderers.
 import { isNewerVersion } from "../contract/index.js";
 import type {
+  BaselineImportOutput,
   BaselineRemoveOutput,
   BaselineSaveOutput,
   StatusGetOutput,
@@ -414,6 +415,11 @@ function workerBaselinesLine(worker: WorkerView): string {
       `${esc(baseline.name)} v${String(baseline.version)}: ${esc(baselineSpec(baseline, false))}${baseline.staleReason === undefined ? "" : ", stale"}`,
   );
   return `\n  Baselines: ${entries.length === 0 ? "none" : entries.join("; ")}`;
+}
+
+export function baselineImportedLine(imported: BaselineImportOutput): string {
+  const { baseline } = imported;
+  return `Imported baseline ${baseline.name} v${String(baseline.version)}: ${baselineSpec(baseline)}. Simulator ${imported.device} was left as it was.\n`;
 }
 
 export function baselineSavedLine(saved: BaselineSaveOutput): string {

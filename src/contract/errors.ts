@@ -90,8 +90,8 @@ export interface ErrorDetailsMap {
   COMPONENT_IN_USE: { readonly devices: number; readonly foreignDevices: number };
   COMPONENT_BUSY: Record<string, never>;
   UNKNOWN_LEASE: { readonly leaseId: string };
-  /** why: a save that ended the lease but kept no baseline: the driver could not make the source. */
-  BASELINE_SAVE_FAILED: { readonly name: string; readonly leaseId: string };
+  /** why: a save that ended the lease, or an import, that kept no baseline: the driver could not make the source. An import holds no lease. */
+  BASELINE_SAVE_FAILED: { readonly name: string; readonly leaseId?: string };
   UNKNOWN_BASELINE: { readonly name: string };
   /** why: a lease request named a baseline and a field it also named differs; `field` is the first that differs. */
   BASELINE_MISMATCH: {

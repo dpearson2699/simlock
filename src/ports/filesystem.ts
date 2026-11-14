@@ -9,14 +9,16 @@ import {
   open,
   readdir,
   readFile,
+  readlink,
   realpath,
   rename,
   rm,
   stat,
   statfs,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -63,6 +65,16 @@ export interface OpenedFile {
   readonly size: number;
   read(range?: { readonly start: number; readonly end: number }): ReadableStream<Uint8Array>;
   close(): Promise<void>;
+}
+
+/** why: what `rewriteTree` asks of its caller for each entry; the caller knows what the bytes mean. */
+export interface TreeRewrite {
+  /** why: the new target of a symbolic link, or `undefined` to leave it. */
+  readonly link: (target: string) => string | undefined;
+  /** why: the bytes a file is to hold instead, as many as it has, or `undefined` to leave it; it may change and return `bytes` itself. */
+  readonly file: (bytes: Buffer) => Buffer | undefined;
+  /** why: answers whether a file this process may not open, named by its path below the root, may be removed; `false` fails the rewrite. */
+  readonly unreadable: (relativePath: string) => boolean;
 }
 
 export interface Filesystem {
@@ -121,6 +133,14 @@ export interface Filesystem {
   diskFree(path: string): Promise<number>;
   diskSpace(path: string): Promise<{ readonly freeBytes: number; readonly totalBytes: number }>;
   directorySize(path: string): Promise<number>;
+  /**
+   * why: Changes what the files under `root` say without changing what they are: a file that
+   * changes keeps its inode, mode, attributes and length, and a symbolic link is replaced by one
+   * with its new target. No link is followed. A file this process may not open (`EACCES`,
+   * `EPERM`) is removed when `rewrite.unreadable` allows it, and fails the rewrite otherwise.
+   * Answers the paths below `root` of the files it removed.
+   */
+  rewriteTree(root: string, rewrite: TreeRewrite): Promise<{ readonly removed: readonly string[] }>;
 }
 
 // why: only the directories that are absent get the mode, so one that is already there keeps its own.
@@ -414,6 +434,55 @@ export class NodeFilesystem implements Filesystem {
       else if (entry.isFile()) total += await this.#sizeOfFile(child);
     }
     return total;
+  }
+
+  async rewriteTree(
+    root: string,
+    rewrite: TreeRewrite,
+  ): Promise<{ readonly removed: readonly string[] }> {
+    const removed: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isSymbolicLink()) await this.#retarget(path, rewrite);
+        else if (entry.isDirectory()) await visit(path);
+        else if (entry.isFile() && (await this.#rewriteFile(path, rewrite, root))) {
+          removed.push(relative(root, path));
+        }
+      }
+    };
+    await visit(root);
+    return { removed };
+  }
+
+  async #retarget(path: string, rewrite: TreeRewrite): Promise<void> {
+    const target = rewrite.link(await readlink(path));
+    if (target === undefined) return;
+    const staged = `${path}.rewriting`;
+    await symlink(target, staged);
+    await rename(staged, path);
+  }
+
+  /** why: answers true when the file was one this process may not open, and was removed. */
+  async #rewriteFile(path: string, rewrite: TreeRewrite, root: string): Promise<boolean> {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(path);
+    } catch (error: unknown) {
+      const denied = hasCode(error, "EACCES") || hasCode(error, "EPERM");
+      if (!denied || !rewrite.unreadable(relative(root, path))) throw error;
+      await rm(path);
+      return true;
+    }
+    const next = keptLength(path, bytes, rewrite.file(bytes));
+    if (next === undefined) return false;
+    const handle = await open(path, "r+");
+    try {
+      await handle.write(next, 0, next.byteLength, 0);
+    } finally {
+      await handle.close();
+    }
+    return false;
   }
 }
 
@@ -766,6 +835,48 @@ export class MemoryFilesystem implements Filesystem {
     return total;
   }
 
+  async rewriteTree(
+    root: string,
+    rewrite: TreeRewrite,
+  ): Promise<{ readonly removed: readonly string[] }> {
+    const removed: string[] = [];
+    const below = [...this.#entries.keys()].filter((path) => path.startsWith(`${root}/`)).sort();
+    for (const path of below) {
+      const entry = this.#entries.get(path);
+      if (entry?.kind === "symlink") {
+        const target = rewrite.link(entry.target);
+        if (target !== undefined) this.#entries.set(path, { ...entry, target });
+      } else if (entry?.kind === "file" && this.#rewriteMemoryFile(path, entry, rewrite, root)) {
+        removed.push(path.slice(root.length + 1));
+      }
+    }
+    return { removed };
+  }
+
+  /** why: answers true when the file was one this process may not open, and was removed. */
+  #rewriteMemoryFile(
+    path: string,
+    entry: MemoryAttributes & { contents: string; bytes?: Uint8Array },
+    rewrite: TreeRewrite,
+    root: string,
+  ): boolean {
+    const code = this.#failures.get(path);
+    if (code === "EACCES" || code === "EPERM") {
+      if (!rewrite.unreadable(path.slice(root.length + 1))) this.#failIfDefined(path);
+      this.#entries.delete(path);
+      this.#failures.delete(path);
+      return true;
+    }
+    this.#failIfDefined(path);
+    const bytes = Buffer.from(fileBytes(entry));
+    const next = keptLength(path, bytes, rewrite.file(bytes));
+    if (next === undefined) return false;
+    const written = Buffer.from(next);
+    entry.bytes = written;
+    entry.contents = written.toString("utf8");
+    return false;
+  }
+
   /**
    * why: Test-only: makes every operation on `path` fail with `code`, which is the only way to
    * reach the branches that turn an unexpected filesystem failure into a typed rejection.
@@ -871,6 +982,14 @@ export class MemoryFilesystem implements Filesystem {
       throw errnoError("ENOTDIR", `Not a directory: ${path}`);
     }
   }
+}
+
+/** why: a rewrite in place keeps the file's length; one that does not is refused before anything is written. */
+function keptLength(path: string, bytes: Buffer, next: Buffer | undefined): Buffer | undefined {
+  if (next !== undefined && next.byteLength !== bytes.byteLength) {
+    throw new Error(`a rewrite of ${path} must keep its ${String(bytes.byteLength)} bytes`);
+  }
+  return next;
 }
 
 function fileBytes(entry: { readonly contents: string; readonly bytes?: Uint8Array }): Uint8Array {

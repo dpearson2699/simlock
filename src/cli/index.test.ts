@@ -5177,6 +5177,71 @@ describe("CLI: baseline save", () => {
   });
 });
 
+describe("CLI: baseline import", () => {
+  it("simlock baseline import sends the name, device, mode and note and prints the baseline with the simulator it left as it was, and refuses a missing --device or a bad --mode as USAGE", async () => {
+    const run = async (argv: string[]) => {
+      const output = outputCapture();
+      const inputs: unknown[] = [];
+      let connected = false;
+      const code = await runCli(
+        argv,
+        output.environmentWith({
+          connectAdmin: async () => {
+            connected = true;
+            return fakeClient({
+              importBaseline: (input) => {
+                inputs.push(input);
+                return Promise.resolve({
+                  baseline: {
+                    mode: input.mode ?? "full",
+                    model: "iPhone 17",
+                    name: input.name,
+                    osVersion: "27.0",
+                    platform: "ios",
+                    savedAt: "2026-11-13T20:00:00.000Z",
+                    sizeBytes: 6_400_000_000,
+                    version: 2,
+                  },
+                  device: input.device,
+                });
+              },
+            });
+          },
+        }),
+      );
+      return { code, connected, inputs, stderr: output.stderr, stdout: output.stdout };
+    };
+
+    const imported = await run([
+      "baseline",
+      "import",
+      "signed-in",
+      "--device",
+      "UDID-1",
+      "--mode",
+      "slim",
+      "--note",
+      "test user",
+    ]);
+    expect([imported.code, imported.stdout, imported.inputs]).toEqual([
+      0,
+      "Imported baseline signed-in v2: ios iPhone 17, iOS 27.0, slim, 6.4 GB. Simulator UDID-1 was left as it was.\n",
+      [{ device: "UDID-1", mode: "slim", name: "signed-in", note: "test user" }],
+    ]);
+    const plain = await run(["baseline", "import", "signed-in", "--device", "UDID-1"]);
+    expect(plain.inputs).toEqual([{ device: "UDID-1", name: "signed-in" }]);
+
+    for (const argv of [
+      ["baseline", "import", "signed-in"],
+      ["baseline", "import", "signed-in", "--device", "UDID-1", "--mode", "fast"],
+    ]) {
+      const refused = await run(argv);
+      expect([refused.code, refused.connected, refused.inputs]).toEqual([2, false, []]);
+      expect(JSON.parse(refused.stderr)).toMatchObject({ error: { code: "USAGE" } });
+    }
+  });
+});
+
 describe("CLI: baseline list", () => {
   const checkout = {
     imageTag: "google_apis",
@@ -8959,6 +9024,7 @@ function fakeClient(overrides: Partial<SimlockAdminClient> = {}): SimlockAdminCl
       Promise.resolve({ deletedDevices: [], releasedLeaseIds: [], removedBaselines: [] }),
     forgetWarmKind: () => Promise.resolve({ forgotten: [] }),
     saveBaseline: () => Promise.reject(new Error("saveBaseline was not expected")),
+    importBaseline: () => Promise.reject(new Error("importBaseline was not expected")),
     listBaselines: () => Promise.resolve({ baselines: [] }),
     removeBaseline: () => Promise.reject(new Error("removeBaseline was not expected")),
     getConfig: () => Promise.resolve({} as SimlockConfig),

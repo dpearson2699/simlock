@@ -38,6 +38,8 @@ import {
   type ReclaimResult,
   removeListedComponent,
   BadDeviceRequestError,
+  DeviceNotImportableError,
+  type ImportedSource,
   RuntimeMissingError,
   UnknownModelError,
   uninstallPlan,
@@ -66,7 +68,8 @@ export type FakeDriverOperation =
   | "destroyLegacy"
   | "listSources"
   | "destroySource"
-  | "saveSource";
+  | "saveSource"
+  | "importSource";
 
 export type DriverEstimateOperation = "provision" | "boot" | "reclaim";
 
@@ -129,6 +132,15 @@ export interface FakeDriverOptions {
    * address, so a test can tell a virtual device from a phone by more than the id.
    */
   readonly addressIsDeviceId?: boolean;
+  /** why: devices `importSource` may copy, by id; any other id is refused as not importable. */
+  readonly importableDevices?: Readonly<Record<string, FakeImportableDevice>>;
+}
+
+/** why: a device outside the fake's own that `importSource` may copy, with what it holds. */
+export interface FakeImportableDevice {
+  readonly model: string;
+  readonly osVersion: string;
+  readonly files?: Readonly<Record<string, string>>;
 }
 
 export class FakeDriverUnknownDeviceError extends Error {
@@ -168,6 +180,7 @@ export class FakeDriver implements Driver {
   readonly #failures = new Map<string, Error>();
   #hangMakeReady = false;
   #sources: readonly DriverSource[] = [];
+  readonly #importable: Readonly<Record<string, FakeImportableDevice>>;
   readonly #deviceFiles = new Map<string, Map<string, string>>();
   readonly #deviceSpecs = new Map<string, VirtualSpec>();
   readonly #sourceFiles = new Map<string, ReadonlyMap<string, string>>();
@@ -203,6 +216,7 @@ export class FakeDriver implements Driver {
 
   constructor(options: FakeDriverOptions) {
     this.#addressIsDeviceId = options.addressIsDeviceId === true;
+    this.#importable = options.importableDevices ?? {};
     this.#availableOsVersions = new Set(options.availableOsVersions ?? ["latest"]);
     this.#clock = options.clock;
     this.#estimateMs = options.estimateMs;
@@ -457,6 +471,29 @@ export class FakeDriver implements Driver {
       },
     ];
     return { sourceId, sizeBytes, ...(imageTag === undefined ? {} : { imageTag }) };
+  }
+
+  async importSource(deviceId: string): Promise<ImportedSource> {
+    await this.#beforeCall("importSource", deviceId);
+    const device = this.#importable[deviceId];
+    if (device === undefined)
+      throw new DeviceNotImportableError(deviceId, "the fake has no such device");
+    const files = new Map(Object.entries(device.files ?? {}));
+    const sizeBytes = [...files.values()].reduce((total, content) => total + content.length, 0);
+    const sourceId = `fake-source-${String(this.#nextSourceNumber)}`;
+    this.#nextSourceNumber += 1;
+    this.#sourceFiles.set(sourceId, files);
+    this.#sources = [
+      ...this.#sources,
+      {
+        id: sourceId,
+        kind: "baseline",
+        model: device.model,
+        osVersion: device.osVersion,
+        sizeBytes,
+      },
+    ];
+    return { model: device.model, osVersion: device.osVersion, sizeBytes, sourceId };
   }
 
   /** why: a test hook that puts a file on a device, so a saved source can be shown to carry it. */

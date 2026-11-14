@@ -19,6 +19,8 @@ import {
   type DriverDevice,
   type DriverSource,
   DriverCrashError,
+  DeviceNotImportableError,
+  type ImportedSource,
   type DriverEstimate,
   type DriverReality,
   type PhysicalDriverDevice,
@@ -93,8 +95,11 @@ import {
   type SlimCategory,
 } from "./slim-labels.js";
 import { assertKeptEnabled, checkExcept, splitByExcept } from "./slim-except.js";
+import { relocationRewrite } from "./clone-relocation.js";
 import {
+  findListedSimulator,
   isRecord,
+  type ListedSimulator,
   parseCatalog,
   parseManagedDevices,
   type DeviceType,
@@ -874,6 +879,101 @@ export class IosSimctlDriver implements Driver {
     }
   }
 
+  async importSource(udid: string): Promise<ImportedSource> {
+    const { deviceType, runtime } = await this.#importable(udid);
+    const sourceId = this.#idGenerator.generate();
+    this.#sources.insertMaking({
+      createdAt: this.#clock.now(),
+      deviceTypeId: deviceType.identifier,
+      kind: "baseline",
+      maker: this.#maker(),
+      model: deviceType.name,
+      originUdid: udid,
+      osVersion: runtime.version,
+      runtimeBuild: runtime.build,
+      runtimeId: runtime.identifier,
+      setPath: this.#sourcesSet,
+      sourceId,
+      specKey: `baseline-${sourceId}`,
+    });
+    try {
+      const cloneUdid = await this.#copyForImport(udid, sourceId);
+      const sizeBytes = await this.#sizeOf(cloneUdid);
+      this.#sources.markReady(sourceId, sizeBytes);
+      return {
+        model: deviceType.name,
+        osVersion: runtime.version,
+        sourceId,
+        ...(sizeBytes === undefined ? {} : { sizeBytes }),
+      };
+    } catch (error: unknown) {
+      const made = this.#sources.findRow(sourceId)?.udid;
+      if (made !== undefined) await this.#deleteSeedSimulator(made).catch(() => undefined);
+      this.#sources.deleteRow(sourceId);
+      throw error;
+    }
+  }
+
+  /** why: an import copies only a shut-down, unmarked simulator of the set this worker uses, made with a runtime and device type this Xcode lists; anything else is refused before a copy. */
+  async #importable(udid: string): Promise<{ deviceType: DeviceType; runtime: Runtime }> {
+    const refuse = (reason: string): never => {
+      throw new DeviceNotImportableError(udid, reason);
+    };
+    if (this.#rootOptions !== undefined) {
+      refuse(
+        'this worker keeps its simulators in its own set; import needs drivers.ios.deviceSet "default"',
+      );
+    }
+    const listed =
+      (await this.#listedSimulator(udid)) ??
+      refuse("Xcode's device set has no simulator with this UDID");
+    if (listed.state !== "Shutdown") {
+      refuse(
+        `it is ${listed.state}; an import copies only a shut-down simulator and never shuts one down`,
+      );
+    }
+    if (
+      (await this.#readMarkFile(join(this.#deviceDirectory(udid), MARK_FILE_NAME))) !== undefined
+    ) {
+      refuse("Simlock made it; save a leased simulator with `baseline save` instead");
+    }
+    const catalog = await this.#loadCatalog();
+    const runtime = catalog.runtimes.find((entry) => entry.identifier === listed.runtimeId);
+    const deviceType = catalog.deviceTypes.find(
+      (entry) => entry.identifier === listed.deviceTypeId,
+    );
+    return runtime !== undefined && deviceType !== undefined
+      ? { deviceType, runtime }
+      : refuse(
+          `its runtime ${listed.runtimeId} or device type ${listed.deviceTypeId} is not installed`,
+        );
+  }
+
+  /** why: the copy, with the steps every clone gets; a simulator booted while it was copied may have been copied half-written, so one no longer Shutdown fails it. */
+  async #copyForImport(udid: string, sourceId: string): Promise<string> {
+    await this.#ensureSourcesSet();
+    const cloneUdid = await this.#createSimulator(
+      ["clone", udid, `simlock-baseline-${sourceId}`, this.#sourcesSet],
+      { discard: (late) => this.#deleteSeedSimulator(late) },
+    );
+    if (cloneUdid === "") throw new DriverCrashError("simctl clone returned no device UDID");
+    this.#sources.setUdid(sourceId, cloneUdid);
+    const after = await this.#listedSimulator(udid);
+    if (after?.state !== "Shutdown") {
+      throw new DriverCrashError(
+        `simulator ${udid} was ${after?.state ?? "deleted"} after it was copied, so the copy was not kept`,
+      );
+    }
+    await this.#copyOverrides(udid, cloneUdid);
+    await this.#dropLaunchServicesDatabase(this.#sourcesSet, cloneUdid);
+    return cloneUdid;
+  }
+
+  async #listedSimulator(udid: string): Promise<ListedSimulator | undefined> {
+    const result = await this.#simctl(["list", "-j", "devices"], COMMAND_TIMEOUT_MS);
+    return findListedSimulator(JSON.parse(result.stdout) as unknown, udid);
+  }
+
   async destroySource(sourceId: string): Promise<void> {
     const row = this.#sources.findRow(sourceId);
     if (row === undefined) {
@@ -950,6 +1050,9 @@ export class IosSimctlDriver implements Driver {
     }
 
     try {
+      if ("originUdid" in seed && seed.originUdid !== undefined) {
+        await this.#pointAtItself(udid, seed.originUdid);
+      }
       await this.#writeMark(udid);
       await this.#dropLaunchServicesDatabase(this.#deviceRoot, udid);
     } catch (error: unknown) {
@@ -972,14 +1075,34 @@ export class IosSimctlDriver implements Driver {
     };
   }
 
-  async #namedSource(sourceId: string): Promise<{ readonly udid: string }> {
+  async #namedSource(
+    sourceId: string,
+  ): Promise<{ readonly udid: string; readonly originUdid?: string }> {
     const row = this.#sources.findRow(sourceId);
     if (row?.state !== "ready" || row.udid === undefined) {
       throw new DriverCrashError(`iOS keeps no ready source ${sourceId}`);
     }
     const reason = sourceStaleReason(row, await this.#loadCatalog());
     if (reason !== undefined) throw new DriverCrashError(`source ${sourceId} is stale: ${reason}`);
-    return { udid: row.udid };
+    return {
+      udid: row.udid,
+      ...(row.originUdid === undefined ? {} : { originUdid: row.originUdid }),
+    };
+  }
+
+  /**
+   * why: a copy of an imported source names, in its stored paths, the simulator the source was
+   * imported from, which still exists; booted before they are rewritten, its daemons would write
+   * into that simulator.
+   */
+  async #pointAtItself(udid: string, originUdid: string): Promise<void> {
+    const { removed } = await this.#filesystem.rewriteTree(
+      this.#dataPathFor(udid),
+      relocationRewrite(originUdid, udid),
+    );
+    for (const path of removed) {
+      this.#logger?.info(`removed ${path} from ${udid}: a cache file the host may not open`);
+    }
   }
 
   /** why: two provisions of one kind at once make one seed, the second waiting for the first's make. */

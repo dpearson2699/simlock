@@ -278,6 +278,10 @@ export class GatewayDispatcher {
         "component.remove",
         "component.remove removes a component from one machine; run it against a worker",
       ),
+      "baseline.import": unsupportedByDesign(
+        "baseline.import",
+        "baseline.import copies a simulator of one machine; run it on the worker that has the simulator",
+      ),
       "device.add": unsupportedByDesign(
         "device.add",
         "device.add enrols a device plugged into one machine; run it on the worker the device is plugged into",

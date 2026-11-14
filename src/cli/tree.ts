@@ -126,6 +126,7 @@ export const COMMANDS: readonly CommandNode[] = [
     load: baselineModule,
     children: [
       { name: "save", load: baselineModule },
+      { name: "import", load: baselineModule },
       { name: "list", load: baselineModule },
       { name: "remove", load: baselineModule },
     ],

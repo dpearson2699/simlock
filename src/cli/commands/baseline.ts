@@ -1,11 +1,17 @@
-import type { SimlockAdminClient } from "../../admin/index.js";
+import type { BaselineImportInput, SimlockAdminClient } from "../../admin/index.js";
 import { commandArgs, subcommandOrUsage, UsageError, withHelpHint, writeResult } from "../args.js";
 import { connectDaemonClient } from "../connect.js";
-import { baselineRemovedLine, baselineSavedLine, baselineTable } from "../format.js";
+import {
+  baselineImportedLine,
+  baselineRemovedLine,
+  baselineSavedLine,
+  baselineTable,
+} from "../format.js";
 import type { CommandContext } from "../tree.js";
 
 const BASELINE_USAGE =
   "Usage: simlock baseline save <name> --lease <id> [--note <text>]\n" +
+  "       simlock baseline import <name> --device <udid> [--mode slim|full] [--note <text>]\n" +
   "       simlock baseline list [--json]\n" +
   "       simlock baseline remove <name> [--yes] [--worker <id>]\n";
 
@@ -15,6 +21,7 @@ async function run(argv: readonly string[], context: CommandContext): Promise<nu
   if (parsed === 0) return 0;
   if (parsed.command === "list") return runList(parsed.flagArgs, environment, token);
   if (parsed.command === "remove") return runRemove(parsed.flagArgs, environment, token);
+  if (parsed.command === "import") return runImport(parsed.flagArgs, environment, token);
   if (parsed.command !== "save") {
     throw new UsageError(withHelpHint(`Unknown baseline command: ${String(parsed.command)}`));
   }
@@ -108,6 +115,52 @@ async function confirmRemoval(
   if (confirmed !== true) throw new UsageError("baseline remove requires confirmation or --yes");
 }
 
+async function runImport(
+  argv: readonly string[],
+  environment: CommandContext["environment"],
+  token: string | undefined,
+): Promise<number> {
+  const values = commandArgs(argv, {
+    device: { type: "string" },
+    help: { type: "boolean", short: "h" },
+    mode: { type: "string" },
+    note: { type: "string" },
+  });
+  if (values.help) {
+    environment.stdout.write(BASELINE_USAGE);
+    return 0;
+  }
+  const input = importInput(values);
+  return answer(environment, token, async (client) =>
+    baselineImportedLine(await client.importBaseline(input)),
+  );
+}
+
+function importInput(values: {
+  readonly positionals: readonly string[];
+  readonly device?: unknown;
+  readonly mode?: unknown;
+  readonly note?: unknown;
+}): BaselineImportInput {
+  const [name, ...extra] = values.positionals;
+  if (name === undefined || extra.length > 0) {
+    throw new UsageError(withHelpHint("baseline import takes one <name>"));
+  }
+  if (typeof values.device !== "string" || values.device === "") {
+    throw new UsageError(withHelpHint("baseline import requires --device <udid>"));
+  }
+  const { mode, note } = values;
+  if (mode !== undefined && mode !== "slim" && mode !== "full") {
+    throw new UsageError(withHelpHint("--mode must be slim or full"));
+  }
+  return {
+    device: values.device,
+    name,
+    ...(mode === undefined ? {} : { mode }),
+    ...(typeof note === "string" ? { note } : {}),
+  };
+}
+
 async function runSave(
   argv: readonly string[],
   environment: CommandContext["environment"],
@@ -131,14 +184,22 @@ async function runSave(
     throw new UsageError(withHelpHint("baseline save requires --lease <id>"));
   }
   const note = typeof values.note === "string" ? values.note : undefined;
+  return answer(environment, token, async (client) =>
+    baselineSavedLine(
+      await client.saveBaseline({ leaseId, name, ...(note === undefined ? {} : { note }) }),
+    ),
+  );
+}
+
+/** why: a command that writes one answer opens the admin connection, writes the line `ask` makes of the daemon's answer, and closes it. */
+async function answer(
+  environment: CommandContext["environment"],
+  token: string | undefined,
+  ask: (client: SimlockAdminClient) => Promise<string>,
+): Promise<number> {
   const client = await connectDaemonClient(environment, token);
   try {
-    const saved = await client.saveBaseline({
-      leaseId,
-      name,
-      ...(note === undefined ? {} : { note }),
-    });
-    environment.stdout.write(baselineSavedLine(saved));
+    environment.stdout.write(await ask(client));
     return 0;
   } finally {
     await client.close();

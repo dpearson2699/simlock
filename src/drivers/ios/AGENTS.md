@@ -28,6 +28,7 @@ Resolve and boot:
 Seeds (ADR 0061):
 
 - A simulator is a clone of its kind's seed. A seed is known by its `ios_source_data` row, never by name, and lives in the sources set: `sources` in the owned set, an owned root of its own under `default`. It is in no `listManaged` and no `simlock simctl list`.
+- `importSource` (`default` only) copies a `Shutdown`, unmarked simulator, never writing it, and keeps `origin_udid`; a copy of that source has the origin's UDID rewritten to its own (`clone-relocation.ts`) before its mark.
 - Every clone (a seed's copy, `saveSource`'s own clone, a `provision` with `source`) has its `data/var/db/lsd/com.apple.LaunchServices-*.csstore` deleted before its first boot: it records each app, system apps included, under the original device's folder. A clone whose drop fails is deleted.
 - Two provisions of a kind make one seed; clones of a seed and its deletion take turns.
 - The `simctl` commands of a simulator's lifecycle (`create`, `clone`, `boot`, `shutdown`, `delete`) wait `ios.simulator.lifecycleTimeoutMs`, not the 30 s of every other call. `create` and `clone` (a seed, a copy, `saveSource`) are not killed at it: CoreSimulator's service finishes the simulator anyway. The caller gets its error, and the simulator the command names when it ends is deleted; a copy of a seed keeps the seed's turn until then. Still silent 5 minutes later, the command is killed and a warning names it.

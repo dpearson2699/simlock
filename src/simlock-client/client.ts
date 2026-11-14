@@ -33,6 +33,8 @@ import type {
   CatalogGetInput,
   CatalogGetOutput,
   CleanupRunInput,
+  BaselineImportInput,
+  BaselineImportOutput,
   BaselineListOutput,
   BaselineRemoveInput,
   BaselineRemoveOutput,
@@ -109,6 +111,8 @@ import type {
 } from "./types.js";
 
 export type {
+  BaselineImportInput,
+  BaselineImportOutput,
   BaselineListOutput,
   BaselineRemoveInput,
   BaselineRemoveOutput,
@@ -350,6 +354,9 @@ export interface SimlockAdminClient extends SimlockClient {
   /** why: ADR 0061 §4: ends the held lease and keeps its device as a named baseline; admin only. */
   saveBaseline(input: BaselineSaveInput): Promise<BaselineSaveOutput>;
 
+  /** why: keeps a copy of a shut-down simulator Simlock did not make as a named baseline, and leaves the simulator as it was; admin only. */
+  importBaseline(input: BaselineImportInput): Promise<BaselineImportOutput>;
+
   /** why: the newest version of each baseline on the worker, with its stale reason. */
   listBaselines(): Promise<BaselineListOutput>;
 
@@ -501,6 +508,7 @@ function buildDegradedClient(
     installComponentOnWorkers: () => rejected(),
     removeComponent: () => rejected(),
     saveBaseline: () => rejected(),
+    importBaseline: () => rejected(),
     listBaselines: () => rejected(),
     removeBaseline: () => rejected(),
     addDevice: () => rejected(),
@@ -843,6 +851,10 @@ class SimlockClientImpl {
 
   saveBaseline(input: BaselineSaveInput): Promise<BaselineSaveOutput> {
     return this.#call("baseline.save", input);
+  }
+
+  importBaseline(input: BaselineImportInput): Promise<BaselineImportOutput> {
+    return this.#call("baseline.import", input);
   }
 
   listBaselines(): Promise<BaselineListOutput> {

@@ -32,6 +32,8 @@ Commands:
                               Remove a runtime or system image Simlock installed
   baseline save <name> --lease <id> [--note <text>]
                               Keep a held simulator or emulator as a named baseline; ends the lease
+  baseline import <name> --device <udid> [--mode slim|full] [--note <text>]
+                              Keep a copy of a shut-down simulator Simlock did not make as a baseline
   baseline list [--json]      List the baselines on this worker
   baseline remove <name> [--yes]
                               Delete a baseline nobody uses

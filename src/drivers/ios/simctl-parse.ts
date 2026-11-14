@@ -46,6 +46,34 @@ export function parseManagedDevices(value: unknown): ParsedManagedDevice[] {
   );
 }
 
+/** why: one simulator of a `simctl list -j devices` answer as an import reads it: its state and what it was made with. */
+export interface ListedSimulator {
+  readonly state: string;
+  readonly deviceTypeId: string;
+  readonly runtimeId: string;
+}
+
+export function findListedSimulator(value: unknown, udid: string): ListedSimulator | undefined {
+  if (!isRecord(value) || !isRecord(value.devices)) {
+    throw new DriverCrashError("Invalid simctl device list JSON");
+  }
+  const [found] = Object.entries(value.devices).flatMap(([runtimeId, devices]) =>
+    (Array.isArray(devices) ? (devices as unknown[]) : [])
+      .filter(
+        (device): device is Record<string, unknown> => isRecord(device) && device.udid === udid,
+      )
+      .map((device) => ({ device, runtimeId })),
+  );
+  if (found === undefined) return undefined;
+  const text = (field: unknown, absent: string): string =>
+    typeof field === "string" ? field : absent;
+  return {
+    deviceTypeId: text(found.device.deviceTypeIdentifier, ""),
+    runtimeId: found.runtimeId,
+    state: text(found.device.state, "unknown"),
+  };
+}
+
 function parseManagedDevice(value: unknown): readonly ParsedManagedDevice[] {
   if (!isRecord(value) || typeof value.name !== "string" || typeof value.udid !== "string") {
     return [];

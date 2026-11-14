@@ -106,6 +106,8 @@ export {
   sameReceipt,
   UnknownModelError,
   BaselineMismatchError,
+  DeviceNotImportableError,
+  type ImportedSource,
   BaselineStaleError,
   BadDeviceRequestError,
   KeptCategoriesError,
@@ -175,6 +177,7 @@ export { Nuke } from "./nuke.js";
 export { type NukeExecutor } from "./core-ports.js";
 export { registryOwner } from "./registry-schema.js";
 export {
+  BaselineImportRefusedError,
   BaselineInUseError,
   BaselineSaveFailedError,
   BaselineService,

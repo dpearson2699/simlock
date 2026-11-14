@@ -233,6 +233,26 @@ export type PhysicalInspection =
       readonly message: string;
     };
 
+/** why: what an import kept, with the spec the device had, which a lease of the baseline gets. */
+export interface ImportedSource {
+  readonly sourceId: string;
+  readonly model: string;
+  readonly osVersion: string;
+  readonly imageTag?: string;
+  readonly sizeBytes?: number;
+}
+
+/** why: a device was refused for import before anything was copied: absent, running, made by Simlock, or of a kind the driver cannot copy. */
+export class DeviceNotImportableError extends Error {
+  constructor(
+    readonly deviceId: string,
+    reason: string,
+  ) {
+    super(`device ${deviceId} cannot be imported: ${reason}`);
+    this.name = "DeviceNotImportableError";
+  }
+}
+
 /** why: a device that booted once and was shut down, kept only to be copied into a lease's device (ADR 0061 §1). */
 export interface DriverSource {
   readonly id: string;
@@ -294,6 +314,13 @@ export interface Driver {
   saveSource(
     device: VirtualDriverDevice,
   ): Promise<{ sourceId: string; sizeBytes?: number; imageTag?: string }>;
+  /**
+   * why: keeps a copy of a shut-down simulator or emulator Simlock did not make as a baseline
+   * source, and only reads the device: it never boots, shuts down, marks or changes it. The source
+   * row is written `making` before the copy, as for `saveSource`. A device that cannot be imported
+   * throws `DeviceNotImportableError` before anything is copied. Absent on a driver that cannot.
+   */
+  importSource?(deviceId: string): Promise<ImportedSource>;
   /**
    * why: Boots the device and returns it with a freshly read `address`. Never trust the address a
    * caller passed in or one captured at `provision` -- an Android console port is assigned per

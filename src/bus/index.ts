@@ -242,7 +242,10 @@ export interface EventMap {
     readonly mode: "slim" | "full";
     readonly imageTag?: string;
     readonly sizeBytes?: number;
-    readonly leaseId: string;
+    /** why: the lease a save ended; absent for an import. */
+    readonly leaseId?: string;
+    /** why: the device an import copied; absent for a save. */
+    readonly deviceId?: string;
     readonly requesterId: string;
   };
   "baseline.removed": {

@@ -722,6 +722,22 @@ export const baselineSave = defineOperation({
   output: z.object({ baseline: baselineEntrySchema, leaseId: z.string().max(256) }),
 });
 
+const baselineImport = defineOperation({
+  name: "baseline.import",
+  role: "admin",
+  effect: "write",
+  // why: `device` is the driver's id of a shut-down simulator Simlock did not make (its UDID); `mode` is what a lease of the baseline gets, full unless named.
+  input: z
+    .object({
+      device: z.string().min(1).max(256),
+      mode: z.enum(["slim", "full"]).optional(),
+      name: baselineNameSchema,
+      note: baselineNoteSchema.optional(),
+    })
+    .strict(),
+  output: z.object({ baseline: baselineEntrySchema, device: z.string().max(256) }),
+});
+
 // fallow-ignore-next-line unused-export -- consumed only through the OPERATIONS registry, not by name; still public contract surface.
 export const baselineList = defineOperation({
   name: "baseline.list",
@@ -1259,6 +1275,7 @@ export const OPERATIONS = {
   "nuke.run": nukeRun,
   "warm.forget": warmForget,
   "baseline.save": baselineSave,
+  "baseline.import": baselineImport,
   "baseline.list": baselineList,
   "baseline.remove": baselineRemove,
   "config.get": configGet,

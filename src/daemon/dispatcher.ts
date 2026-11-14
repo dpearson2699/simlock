@@ -33,7 +33,6 @@ import {
   BaselineInUseError,
   BaselineMismatchError,
   BaselineStaleError,
-  BaselineSaveFailedError,
   UnknownBaselineError,
   type BaselineService,
   type WarmKindForgetter,
@@ -47,6 +46,7 @@ import {
   redactConfig,
 } from "../core/index.js";
 import type { ModuleInputs } from "../modules/index.js";
+import { importBaseline, saveBaseline } from "./baseline-writes.js";
 import { rotationRefusal } from "./rotation-refusal.js";
 import {
   type DeviceModeReader,
@@ -168,7 +168,7 @@ export interface DispatcherOptions {
   /** why: `warm.forget`'s one way into the warm pool's learned record; optional so tests that never forget need no pool. */
   readonly warmKinds?: WarmKindForgetter;
   /** why: the baselines' one way in; optional so tests that never save need none. */
-  readonly baselines?: Pick<BaselineService, "list" | "remove" | "save">;
+  readonly baselines?: Pick<BaselineService, "import" | "list" | "remove" | "save">;
   readonly enrollment?: Pick<PhysicalEnrollment, "add" | "remove">;
   readonly passthrough?: PassthroughResolver;
   /** why: the lease's device input, which `device.rotate` writes to; optional so tests that never rotate need none. */
@@ -304,6 +304,7 @@ export class Dispatcher {
       "nuke.run": this.#nukeRun,
       "warm.forget": this.#warmForget,
       "baseline.save": this.#baselineSave,
+      "baseline.import": this.#baselineImport,
       "baseline.list": this.#baselineList,
       "baseline.remove": this.#baselineRemove,
       "config.get": this.#configGet,
@@ -999,39 +1000,11 @@ export class Dispatcher {
     };
   };
 
-  #baselineSave: Handler<"baseline.save"> = async (input, session) => {
-    if (this.options.baselines === undefined)
-      throw new DispatchError("INTERNAL", "Baselines are unavailable");
-    const lease = this.options.registry.snapshot.leases.find(
-      (candidate) => candidate.id === input.leaseId,
-    );
-    if (lease === undefined) throw new UnknownLeaseError(input.leaseId);
-    const held = this.options.registry.snapshot.devices.find(
-      (candidate) => candidate.id === lease.deviceId,
-    );
-    if (held?.physical === true) {
-      throw new DispatchError(
-        "BAD_REQUEST",
-        `lease ${lease.id} is on a physical device; only a simulator or emulator can be saved as a baseline`,
-      );
-    }
-    try {
-      return await this.options.baselines.save({
-        leaseId: input.leaseId,
-        name: input.name,
-        ...(input.note === undefined ? {} : { note: input.note }),
-        requesterId: session.principal,
-      });
-    } catch (error: unknown) {
-      if (error instanceof BaselineSaveFailedError) {
-        throw new DispatchError("BASELINE_SAVE_FAILED", error.message, {
-          leaseId: error.leaseId,
-          name: error.baselineName,
-        });
-      }
-      throw error;
-    }
-  };
+  #baselineSave: Handler<"baseline.save"> = (input, session) =>
+    saveBaseline(this.options.baselines, this.options.registry.snapshot, input, session.principal);
+
+  #baselineImport: Handler<"baseline.import"> = (input, session) =>
+    importBaseline(this.options.baselines, input, session.principal);
 
   #baselineList: Handler<"baseline.list"> = async () => {
     if (this.options.baselines === undefined)

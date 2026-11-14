@@ -2,8 +2,8 @@ import type { EventBus } from "../bus/index.js";
 import type { BaselineEntry } from "../contract/index.js";
 import type { Clock } from "../ports/index.js";
 import type { StateDatabase } from "../state/index.js";
-import { assertVirtual, type Platform, type VirtualDevice } from "./domain.js";
-import type { Driver, DriverSource } from "./driver.js";
+import { assertVirtual, type DeviceMode, type Platform, type VirtualDevice } from "./domain.js";
+import { DeviceNotImportableError, type Driver, type DriverSource } from "./driver.js";
 import { NoDriverError } from "./driver-catalog.js";
 import type { ReclaimCoordinator, SavedSource } from "./reclaim-coordinator.js";
 import type { Registry, ReleasedLease } from "./registry.js";
@@ -24,15 +24,46 @@ export interface BaselineSaveResult {
   readonly leaseId: string;
 }
 
+export interface BaselineImportRequest {
+  /** why: the driver's id of the device to copy, a simulator's UDID on iOS. */
+  readonly deviceId: string;
+  readonly mode: DeviceMode;
+  readonly name: string;
+  readonly note?: string | undefined;
+  readonly platform: Platform;
+  readonly requesterId: string;
+}
+
+export interface BaselineImportResult {
+  readonly baseline: BaselineEntry;
+  readonly deviceId: string;
+}
+
 /** why: the lease has ended and no baseline was kept, which the caller must be told apart from a refusal. */
 export class BaselineSaveFailedError extends Error {
   constructor(
     readonly baselineName: string,
-    readonly leaseId: string,
+    /** why: absent for an import, which holds no lease. */
+    readonly leaseId: string | undefined,
     readonly reason: string,
   ) {
-    super(`baseline ${baselineName} was not saved: ${reason}. Lease ${leaseId} has ended.`);
+    super(
+      leaseId === undefined
+        ? `baseline ${baselineName} was not saved: ${reason}`
+        : `baseline ${baselineName} was not saved: ${reason}. Lease ${leaseId} has ended.`,
+    );
     this.name = "BaselineSaveFailedError";
+  }
+}
+
+/** why: an import copied nothing: the driver refused the device before any copy, or cannot import at all. */
+export class BaselineImportRefusedError extends Error {
+  constructor(
+    readonly baselineName: string,
+    reason: string,
+  ) {
+    super(`baseline ${baselineName} was not imported: ${reason}`);
+    this.name = "BaselineImportRefusedError";
   }
 }
 
@@ -94,7 +125,9 @@ export interface BaselineRemoveResult {
 
 export interface BaselineServiceOptions {
   readonly clock: Clock;
-  readonly drivers: { get(platform: Platform): Pick<Driver, "destroySource" | "listSources"> };
+  readonly drivers: {
+    get(platform: Platform): Pick<Driver, "destroySource" | "importSource" | "listSources">;
+  };
   readonly leaseSave: () => {
     releaseToSave<Result>(
       leaseId: string,
@@ -145,7 +178,7 @@ export class BaselineService {
           await this.options.reclaim.retireSaved(
             { device, lease: released.lease },
             async (saved) => {
-              recorded.entry = this.#insert(request, device, saved);
+              recorded.entry = this.#insert(request, { ...device.spec, mode: device.mode }, saved);
               this.options.eventBus.emit(
                 "baseline.saved",
                 {
@@ -171,6 +204,58 @@ export class BaselineService {
     await this.#destroyIdleOlderDevices(baseline.name, baseline.version);
     await this.#dropReplaced(request.requesterId);
     return { baseline, leaseId: request.leaseId };
+  }
+
+  /**
+   * why: a baseline made from a shut-down device Simlock did not make, which the driver only
+   * reads; a lease of it gets the device's model and OS version and the requested mode. It is the
+   * next version of the name, as a save is, and is announced the same way.
+   */
+  // fallow-ignore-next-line unused-class-member -- reached through a `Pick` of the class that the dispatcher holds.
+  import(request: BaselineImportRequest): Promise<BaselineImportResult> {
+    return this.#serial(() => this.#import(request));
+  }
+
+  async #import(request: BaselineImportRequest): Promise<BaselineImportResult> {
+    const driver = this.options.drivers.get(request.platform);
+    if (driver.importSource === undefined) {
+      throw new BaselineImportRefusedError(
+        request.name,
+        `the ${request.platform} driver cannot import a device`,
+      );
+    }
+    let imported;
+    try {
+      imported = await driver.importSource(request.deviceId);
+    } catch (error: unknown) {
+      if (error instanceof DeviceNotImportableError) {
+        throw new BaselineImportRefusedError(request.name, error.message);
+      }
+      throw new BaselineSaveFailedError(
+        request.name,
+        undefined,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const baseline = this.#insert(
+      request,
+      {
+        mode: request.mode,
+        model: imported.model,
+        osVersion: imported.osVersion,
+        platform: request.platform,
+        ...(imported.imageTag === undefined ? {} : { imageTag: imported.imageTag }),
+      },
+      imported,
+    );
+    this.options.eventBus.emit(
+      "baseline.saved",
+      { ...savedPayload(baseline), deviceId: request.deviceId, requesterId: request.requesterId },
+      "baselines",
+    );
+    await this.#destroyIdleOlderDevices(baseline.name, baseline.version);
+    await this.#dropReplaced(request.requesterId);
+    return { baseline, deviceId: request.deviceId };
   }
 
   /** why: the version a provision copies stays until its copy has a record, then a replace may drop it. */
@@ -485,8 +570,14 @@ export class BaselineService {
   }
 
   #insert(
-    request: BaselineSaveRequest,
-    device: ReturnType<typeof assertVirtual>,
+    request: { readonly name: string; readonly note?: string | undefined },
+    spec: {
+      readonly platform: Platform;
+      readonly model: string;
+      readonly osVersion: string;
+      readonly mode: DeviceMode;
+      readonly imageTag?: string | undefined;
+    },
     saved: SavedSource,
   ): BaselineEntry {
     const { database } = this.options.state;
@@ -495,7 +586,7 @@ export class BaselineService {
       .get(request.name);
     const version = Number(next?.version);
     const savedAt = new Date(this.options.clock.now()).toISOString();
-    const imageTag = saved.imageTag ?? device.spec.imageTag;
+    const imageTag = saved.imageTag ?? spec.imageTag;
     database
       .prepare(
         `INSERT INTO baselines
@@ -505,21 +596,21 @@ export class BaselineService {
       .run(
         request.name,
         version,
-        device.spec.platform,
-        device.spec.model,
-        device.spec.osVersion,
-        device.mode,
+        spec.platform,
+        spec.model,
+        spec.osVersion,
+        spec.mode,
         imageTag ?? null,
         request.note ?? null,
         savedAt,
         saved.sourceId,
       );
     return {
-      mode: device.mode,
-      model: device.spec.model,
+      mode: spec.mode,
+      model: spec.model,
       name: request.name,
-      osVersion: device.spec.osVersion,
-      platform: device.spec.platform,
+      osVersion: spec.osVersion,
+      platform: spec.platform,
       savedAt,
       version,
       ...(imageTag === undefined ? {} : { imageTag }),

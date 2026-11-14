@@ -28,9 +28,11 @@ export const iosSourceDataOwner: SqliteSchemaOwner = {
              OR (newer.created_at = ios_source_data.created_at AND newer.source_id > ios_source_data.source_id)));
      CREATE UNIQUE INDEX ios_source_data_ready_seed ON ios_source_data (spec_key)
        WHERE kind = 'seed' AND state = 'ready';`,
+    // why: an imported source is a copy of a simulator Simlock did not make, whose stored paths name that simulator; each copy of the source is pointed at itself before its first boot.
+    `ALTER TABLE ios_source_data ADD COLUMN origin_udid TEXT`,
   ],
   name: "ios-source-data",
-  version: 2,
+  version: 3,
 };
 
 export interface NewSourceRow {
@@ -45,6 +47,8 @@ export interface NewSourceRow {
   readonly osVersion: string;
   readonly maker: string;
   readonly createdAt: number;
+  /** why: set only for an imported source: the simulator it was copied from. */
+  readonly originUdid?: string;
 }
 
 export interface SourceRow {
@@ -59,6 +63,7 @@ export interface SourceRow {
   readonly state: "making" | "ready";
   readonly maker: string;
   readonly sizeBytes: number | undefined;
+  readonly originUdid: string | undefined;
 }
 
 export interface ReadySeed {
@@ -79,8 +84,8 @@ export class IosSourceTable {
     this.#database
       .prepare(
         `INSERT INTO ios_source_data (source_id, kind, spec_key, set_path, device_type_id, runtime_id,
-           runtime_build, model, os_version, state, maker, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'making', ?, ?)`,
+           runtime_build, model, os_version, state, maker, created_at, origin_udid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'making', ?, ?, ?)`,
       )
       .run(
         row.sourceId,
@@ -94,6 +99,7 @@ export class IosSourceTable {
         row.osVersion,
         row.maker,
         row.createdAt,
+        row.originUdid ?? null,
       );
   }
 
@@ -162,7 +168,7 @@ export class IosSourceTable {
     return this.#database
       .prepare(
         `SELECT source_id, kind, udid, device_type_id, runtime_id, runtime_build, model, os_version,
-           state, maker, size_bytes FROM ios_source_data ${where}`,
+           state, maker, size_bytes, origin_udid FROM ios_source_data ${where}`,
       )
       .all(...parameters)
       .map((row) => ({
@@ -177,6 +183,7 @@ export class IosSourceTable {
         state: row["state"] as "making" | "ready",
         maker: row["maker"] as string,
         sizeBytes: (row["size_bytes"] as number | null) ?? undefined,
+        originUdid: (row["origin_udid"] as string | null) ?? undefined,
       }));
   }
 }

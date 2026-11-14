@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BootTimeoutError,
   ComponentInUseError,
+  DeviceNotImportableError,
   ComponentNotOwnedError,
   DriverCrashError,
   OwnedRootError,
@@ -5753,6 +5754,194 @@ describe("IosSimctlDriver device set", () => {
         PassthroughRefusedError,
       );
     }
+  });
+});
+
+describe("IosSimctlDriver importSource", () => {
+  const coreSimulatorRoot = "/CoreSim";
+  const devicesDir = `${coreSimulatorRoot}/Devices`;
+  const sourcesSet = "/home/.simlock/devices/ios-sources";
+  const origin = "11111111-2222-3333-4444-555555555555";
+  const sourceUdid = "00000000-0000-0000-0000-0000000000bb";
+  const leaseUdid = "00000000-0000-0000-0000-0000000000cc";
+  const listDevices = { args: ["simctl", "list", "-j", "devices"], command: "xcrun" };
+  const listCatalog = {
+    args: ["simctl", "list", "-j", "devicetypes", "runtimes"],
+    command: "xcrun",
+  };
+  const importClone = {
+    args: ["simctl", "clone", origin, "simlock-baseline-device-1", sourcesSet],
+    command: "xcrun",
+  };
+  const answer = (stdout: string) => ({ code: 0, stderr: "", stdout });
+  const devices = (state: string, udid = origin) =>
+    JSON.stringify({
+      devices: {
+        [driverData.runtimeId]: [
+          {
+            deviceTypeIdentifier: driverData.deviceTypeId,
+            isAvailable: true,
+            name: "Signed in",
+            state,
+            udid,
+          },
+        ],
+      },
+    });
+  const named = `<string>${devicesDir}/${origin}/data/Library</string>`;
+
+  async function importer(
+    runner: ScriptedProcessRunner,
+    filesystem: Filesystem,
+    database: SqliteDatabase,
+    driverConfig: Record<string, string> = { deviceSet: "default" },
+  ): Promise<IosSimctlDriver> {
+    return IosSimctlDriver.create({
+      clock: new FakeClock(),
+      coreSimulatorRoot,
+      database,
+      driverConfig,
+      filesystem,
+      idGenerator: { generate: () => "device-1" },
+      instanceId,
+      processRunner: runner,
+      simlockHome: "/home/.simlock",
+    });
+  }
+
+  /** why: the origin's folder, and what `simctl clone` leaves for a lease's copy, which names the origin. */
+  async function plantFolders(filesystem: MemoryFilesystem): Promise<void> {
+    await filesystem.mkdirp(`${devicesDir}/${origin}/data`);
+    await filesystem.writeFileAtomic(`${devicesDir}/${origin}/data/a.plist`, named);
+    await filesystem.mkdirp(`${devicesDir}/${leaseUdid}/data/Library`);
+    await filesystem.writeFileAtomic(`${devicesDir}/${leaseUdid}/data/a.plist`, named);
+    filesystem.defineSymlink(
+      `${devicesDir}/${leaseUdid}/data/Library/Logs`,
+      `/Logs/CoreSimulator/${origin}`,
+    );
+    for (const udid of [origin, leaseUdid]) {
+      await filesystem.mkdirp(`/Logs/CoreSimulator/${udid}`);
+      await filesystem.writeFileAtomic(`/Logs/CoreSimulator/${udid}/system.log`, `log of ${udid}`);
+    }
+  }
+
+  it("keeps a copy of a shut-down simulator it did not make, running nothing on the simulator but the copy, and points each lease's copy at itself before its mark", async () => {
+    const filesystem = new MemoryFilesystem();
+    await plantFolders(filesystem);
+    const database = await memorySourceDatabase();
+    const runner = new ScriptedProcessRunner([
+      { match: listDevices, result: answer(devices("Shutdown")) },
+      { match: listCatalog, result: answer(listFixture) },
+      { match: importClone, result: answer(`${sourceUdid}\n`) },
+      { match: listDevices, result: answer(devices("Shutdown")) },
+      { match: listCatalog, result: answer(listFixture) },
+      { match: listCatalog, result: answer(listFixture) },
+      {
+        match: {
+          args: [
+            "simctl",
+            "--set",
+            sourcesSet,
+            "clone",
+            sourceUdid,
+            "simlock-device-1",
+            devicesDir,
+          ],
+          command: "xcrun",
+        },
+        result: answer(`${leaseUdid}\n`),
+      },
+    ]);
+    const driver = await importer(runner, filesystem, database);
+
+    await expect(driver.importSource(origin)).resolves.toEqual({
+      model: "iPhone 16",
+      osVersion: "26.5",
+      sourceId: "device-1",
+    });
+    expect(
+      runner.calls.filter((call) => call.args.includes(origin)).map((call) => call.args),
+      "the only command that names the simulator is the copy",
+    ).toEqual([importClone.args]);
+    await expect(filesystem.readFile(`${devicesDir}/${origin}/data/a.plist`)).resolves.toBe(named);
+    await expect(filesystem.readdir(`${devicesDir}/${origin}`)).resolves.toEqual(["data"]);
+
+    await driver.provision(spec, { source: "device-1" });
+
+    await expect(filesystem.readFile(`${devicesDir}/${leaseUdid}/data/a.plist`)).resolves.toBe(
+      named.replace(origin, leaseUdid),
+    );
+    await expect(
+      filesystem.readFile(`${devicesDir}/${leaseUdid}/data/Library/Logs/system.log`),
+    ).resolves.toBe(`log of ${leaseUdid}`);
+    await expect(filesystem.exists(`${devicesDir}/${leaseUdid}/simlock-mark.json`)).resolves.toBe(
+      true,
+    );
+  });
+
+  it.each([
+    {
+      name: "absent from Xcode's set",
+      listed: devices("Shutdown", "other"),
+      mark: false,
+      config: undefined,
+    },
+    { name: "booted", listed: devices("Booted"), mark: false, config: undefined },
+    { name: "made by a Simlock", listed: devices("Shutdown"), mark: true, config: undefined },
+    {
+      name: "outside the set this worker keeps its simulators in",
+      listed: undefined,
+      mark: false,
+      config: { deviceRoot },
+    },
+  ])("refuses a simulator $name and copies nothing", async ({ listed, mark, config }) => {
+    const filesystem = new MemoryFilesystem();
+    await plantFolders(filesystem);
+    if (mark) {
+      await filesystem.writeFileAtomic(
+        `${devicesDir}/${origin}/simlock-mark.json`,
+        JSON.stringify({ instanceId: "another", token: "t", udid: origin }),
+      );
+    }
+    if (config !== undefined) await plantManagedDevice(filesystem);
+    const database = await memorySourceDatabase();
+    const runner = new ScriptedProcessRunner(
+      listed === undefined ? [] : [{ match: listDevices, result: answer(listed) }],
+    );
+    const driver = await importer(runner, filesystem, database, config);
+
+    await expect(driver.importSource(origin)).rejects.toBeInstanceOf(DeviceNotImportableError);
+    expect(runner.calls.filter((call) => call.args.includes("clone"))).toEqual([]);
+    expect(database.prepare("SELECT source_id FROM ios_source_data").all()).toEqual([]);
+  });
+
+  it("drops the copy of a simulator that left Shutdown while it was copied", async () => {
+    const filesystem = new MemoryFilesystem();
+    await plantFolders(filesystem);
+    const database = await memorySourceDatabase();
+    const runner = new ScriptedProcessRunner([
+      { match: listDevices, result: answer(devices("Shutdown")) },
+      { match: listCatalog, result: answer(listFixture) },
+      { match: importClone, result: answer(`${sourceUdid}\n`) },
+      { match: listDevices, result: answer(devices("Booted")) },
+      {
+        match: { args: ["simctl", "--set", sourcesSet, "shutdown", sourceUdid], command: "xcrun" },
+      },
+      { match: { args: ["simctl", "--set", sourcesSet, "delete", sourceUdid], command: "xcrun" } },
+    ]);
+    const driver = await importer(runner, filesystem, database);
+
+    await expect(driver.importSource(origin)).rejects.toMatchObject({
+      message: expect.stringContaining("was Booted after it was copied"),
+    });
+    expect(runner.calls.at(-1)?.args).toEqual([
+      "simctl",
+      "--set",
+      sourcesSet,
+      "delete",
+      sourceUdid,
+    ]);
+    expect(database.prepare("SELECT source_id FROM ios_source_data").all()).toEqual([]);
   });
 });
 
