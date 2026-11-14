@@ -1,6 +1,6 @@
 {
   "name": "simlock",
-  "version": "0.7.0-bug1546.2",
+  "version": "0.7.0-bug1546.3",
   "description": "Control plane for iOS simulators and Android emulators.",
   "keywords": [
     "agents",
